@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp-deployment    # название
+  labels:
+    app: webapp  # метка
+spec: #требуемое состояние объекта
+  replicas: 1 # количество под запущенных в каждый момент времени
+  minReadySeconds : 11   # Минимальное время секунд, преждем чем поды будут считаться готовыми к работе, при учете, что приложение инициализируется 5-10 сек.
+  selector:
+    matchLabels:
+      app: webapp
+  template:
+    metadata:
+      labels:
+        app: webapp
+    spec:
+      topologySpreadConstraints: # В этом блоке решаем задачу повышения отказоустойчивости таким образом, чтобы поды запускались на разных нодах, в разных зонах
+                                 # Так же рассматривала вариант с podAntiAffinity, чтобы на каждом хосте (ноде) запусказалось по одному поду, но тогда зоны не учитываются
+      - maxSkew: 1
+        topologyKey: zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: webapp
+      containers:
+      - name: webapp
+        image: nginx:1.21.4 # В качестве примера
+        ports:
+        - containerPort: 80
+        - containerPort: 443
+        resources: # Блок, описывающий ресурсы, выделяемые приложению
+          requests:
+            cpu: "100m" # Приложение будет запрашивать 0.1 CPU ("весь" CPU=1), но ему будет позволено использовать больше ресурсов, 
+                       # если потребуется, в случае если на ноде, где запущен экземпляр приложения, есть доступные ресурсы 
+          limits:
+            memory: "128M" # Приложению будет установлен лимит в 128 Мб, больше оно использовать не сможет
+---
+# Вариант решения задачи с изменяющейся нагрузкой (день, ночь) и экономией ресурсов. Организуем скалирование копий приложения с максимумом в 4 реплики
+# Для принятия решения об увеличении реплик следим за утилизацией ЦПУ, HPA будет поддерживать среднюю загрузку в 70% на репликах. И, так же смотрим на 
+# метрику объекта requests-per-second, отслеживающую количество запросов, например 10к. При возрастании и уменьшении нагрузки HPA будет увеличивать  уменьшать
+# количество нод соотвественно. Для ручного контроля количества реплик можно использовать CronJob
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  app: webapp
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    app: webapp
+  minReplicas: 1
+  maxReplicas: 4 #Справляются с пиковой нагрузкой
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Object
+    object:
+      metric:
+        name: requests-per-second
+      describedObject:
+        apiVersion: networking.k8s.io/v1beta1
+        kind: Ingress
+        name: main-route
+      target:
+        type: Value
+        value: 10k
